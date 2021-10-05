@@ -18,6 +18,8 @@ module OmniAuth
         'code' => { exception_class: OmniAuth::OpenIDConnect::MissingCodeError, key: :missing_code }.freeze,
       }.freeze
 
+      attr_reader :access_token
+
       def_delegator :request, :params
 
       option :name, 'openid_connect'
@@ -57,6 +59,7 @@ module OmniAuth
       option :extra_authorize_params, {}
       option :allow_authorize_params, []
       option :uid_field, 'sub'
+      option :add_userinfo, false
       option :pkce, false
       option :pkce_verifier, nil
       option :pkce_options, {
@@ -125,14 +128,14 @@ module OmniAuth
 
         options.issuer = issuer if options.issuer.nil? || options.issuer.empty?
 
-        verify_id_token!(params['id_token']) if configured_response_type == 'id_token'
+        authorization_nonce = stored_nonce
+        verify_id_token!(params['id_token'], nonce: authorization_nonce) if configured_response_types.include?('id_token')
         discover!
         client.redirect_uri = redirect_uri
 
-        return id_token_callback_phase if configured_response_type == 'id_token'
+        return id_token_callback_phase if configured_response_types == 'id_token'
 
-        client.authorization_code = authorization_code
-        access_token
+        @access_token = fetch_access_token(code: authorization_code, nonce: authorization_nonce)
         super
       rescue CallbackError => e
         fail!(e.error, e)
@@ -249,8 +252,8 @@ module OmniAuth
         end
       end
 
-      def access_token
-        return @access_token if @access_token
+      def fetch_access_token(code:, nonce:)
+        client.authorization_code = code
 
         token_request_params = {
           scope: (options.scope if options.send_scope_to_token_endpoint),
@@ -259,10 +262,10 @@ module OmniAuth
 
         token_request_params[:code_verifier] = params['code_verifier'] || session.delete('omniauth.pkce.verifier') if options.pkce
 
-        @access_token = client.access_token!(token_request_params)
-        verify_id_token!(@access_token.id_token) if configured_response_type == 'code'
-
-        @access_token
+        client.access_token!(token_request_params).tap do |access_token|
+          # If hybrid flow, then token has already been verified.
+          verify_id_token!(access_token.id_token, nonce: nonce)
+        end
       end
 
       def decode_id_token(id_token)
@@ -372,24 +375,25 @@ module OmniAuth
       end
 
       def valid_response_type?
-        return true if params.key?(configured_response_type)
+        missing = configured_response_types - params.keys
+        return true if missing.empty?
 
-        error_attrs = RESPONSE_TYPE_EXCEPTIONS[configured_response_type]
+        error_attrs = RESPONSE_TYPE_EXCEPTIONS[missing.first]
         fail!(error_attrs[:key], error_attrs[:exception_class].new(params['error']))
 
         false
       end
 
-      def configured_response_type
-        @configured_response_type ||= options.response_type.to_s
+      def configured_response_types
+        @configured_response_types ||= options.response_type.to_s.split
       end
 
-      def verify_id_token!(id_token)
+      def verify_id_token!(id_token, nonce:)
         return unless id_token
 
         decode_id_token(id_token).verify!(issuer: options.issuer,
                                           client_id: client_options.identifier,
-                                          nonce: stored_nonce)
+                                          nonce: nonce)
       end
 
       class CallbackError < StandardError
