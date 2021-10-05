@@ -56,6 +56,7 @@ module OmniAuth
       option :post_logout_redirect_uri
       option :extra_authorize_params, {}
       option :uid_field, 'sub'
+      option :add_userinfo, false
 
       def uid
         user_info.raw_attributes[options.uid_field.to_sym] || user_info.sub
@@ -115,11 +116,11 @@ module OmniAuth
 
         options.issuer = issuer if options.issuer.nil? || options.issuer.empty?
 
-        verify_id_token!(params['id_token']) if configured_response_type == 'id_token'
+        verify_id_token!(params['id_token']) if configured_response_types.include?('id_token')
         discover!
         client.redirect_uri = redirect_uri
 
-        return id_token_callback_phase if configured_response_type == 'id_token'
+        return id_token_callback_phase if configured_response_types.include?('id_token') && !options.add_userinfo
 
         client.authorization_code = authorization_code
         access_token
@@ -220,7 +221,8 @@ module OmniAuth
           client_auth_method: options.client_auth_method
         )
 
-        verify_id_token!(@access_token.id_token) if configured_response_type == 'code'
+        # If hybrid flow, then token has already been verified.
+        verify_id_token!(@access_token.id_token) if configured_response_types == ['code']
 
         @access_token
       end
@@ -325,16 +327,17 @@ module OmniAuth
       end
 
       def valid_response_type?
-        return true if params.key?(configured_response_type)
+        missing = configured_response_types - params.keys
+        return true if missing.empty?
 
-        error_attrs = RESPONSE_TYPE_EXCEPTIONS[configured_response_type]
+        error_attrs = RESPONSE_TYPE_EXCEPTIONS[missing.first]
         fail!(error_attrs[:key], error_attrs[:exception_class].new(params['error']))
 
         false
       end
 
-      def configured_response_type
-        @configured_response_type ||= options.response_type.to_s
+      def configured_response_types
+        @configured_response_types ||= options.response_type.to_s.split
       end
 
       def verify_id_token!(id_token)
